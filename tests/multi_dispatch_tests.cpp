@@ -1,132 +1,14 @@
+#include "multi_visit.hpp"
+
 #include <gtest/gtest.h>
-#include <variant>
-#include <tuple>
-#include <utility>
-#include <type_traits>
-#include <string>
-#include <sstream>
-#include <optional>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <variant>
 #include <vector>
-
-template<typename... Ts>
-struct overloaded : Ts... { using Ts::operator()...; };
-
-template<typename... Ts>
-overloaded(Ts...) -> overloaded<Ts...>;
-
-template<typename T>
-struct is_variant : std::false_type {};
-
-template<typename... Ts>
-struct is_variant<std::variant<Ts...>> : std::true_type {};
-
-template<typename T>
-inline constexpr bool is_variant_v = is_variant<T>::value;
-
-template<typename Tuple, typename F, std::size_t... Is>
-constexpr decltype(auto) apply_with_index_impl(F&& f, Tuple&& t, std::index_sequence<Is...>) {
-    return std::forward<F>(f)(std::get<Is>(std::forward<Tuple>(t))...);
-}
-
-template<typename Tuple, typename F>
-constexpr decltype(auto) apply_with_index(F&& f, Tuple&& t) {
-    return apply_with_index_impl(
-        std::forward<F>(f), 
-        std::forward<Tuple>(t),
-        std::make_index_sequence<std::tuple_size_v<std::remove_reference_t<Tuple>>>{}
-    );
-}
-
-template<typename Visitor, typename Tuple, std::size_t I = 0>
-struct VariantTupleVisitor {
-    template<typename... Args>
-    static constexpr decltype(auto) visit(Visitor&& visitor, Tuple&& tuple, Args&&... args) {
-        if constexpr (I == std::tuple_size_v<std::remove_reference_t<Tuple>>) {
-            return std::forward<Visitor>(visitor)(std::forward<Args>(args)...);
-        } else {
-            return std::visit([&](auto&& val) -> decltype(auto) {
-                return VariantTupleVisitor<Visitor, Tuple, I + 1>::visit(
-                    std::forward<Visitor>(visitor),
-                    std::forward<Tuple>(tuple),
-                    std::forward<Args>(args)...,
-                    std::forward<decltype(val)>(val)
-                );
-            }, std::get<I>(std::forward<Tuple>(tuple)));
-        }
-    }
-};
-
-template<typename F, typename... Variants>
-constexpr decltype(auto) multi_visit(F&& f, Variants&&... variants) {
-    static_assert((is_variant_v<std::remove_reference_t<Variants>> && ...));
-    return VariantTupleVisitor<F, std::tuple<Variants...>>::visit(
-        std::forward<F>(f),
-        std::forward_as_tuple(std::forward<Variants>(variants)...)
-    );
-}
-
-template<typename F, typename Tuple>
-constexpr decltype(auto) multi_visit_tuple(F&& f, Tuple&& tuple) {
-    return apply_with_index([&f](auto&&... variants) -> decltype(auto) {
-        return multi_visit(std::forward<F>(f), std::forward<decltype(variants)>(variants)...);
-    }, std::forward<Tuple>(tuple));
-}
-
-template<typename T, typename = void>
-struct has_call_operator : std::false_type {};
-
-template<typename T>
-struct has_call_operator<T, std::void_t<decltype(&T::operator())>> : std::true_type {};
-
-template<typename F, typename... Args>
-struct is_invocable_impl : std::false_type {};
-
-template<typename F, typename... Args>
-struct is_invocable_impl<F, std::enable_if_t<std::is_invocable_v<F, Args...>>, Args...> : std::true_type {};
-
-template<typename Tuple, std::size_t... Is>
-constexpr auto tuple_transform_impl(Tuple&& t, auto&& f, std::index_sequence<Is...>) {
-    return std::make_tuple(f(std::get<Is>(std::forward<Tuple>(t)))...);
-}
-
-template<typename Tuple, typename F>
-constexpr auto tuple_transform(Tuple&& t, F&& f) {
-    return tuple_transform_impl(
-        std::forward<Tuple>(t),
-        std::forward<F>(f),
-        std::make_index_sequence<std::tuple_size_v<std::remove_reference_t<Tuple>>>{}
-    );
-}
-
-template<typename... Functors>
-class MultiDispatcher {
-    std::tuple<Functors...> functors;
-    
-    template<std::size_t I, typename... Args>
-    constexpr auto try_dispatch(Args&&... args) const -> std::optional<int> {
-        if constexpr (I < sizeof...(Functors)) {
-            if constexpr (std::is_invocable_v<decltype(std::get<I>(functors)), Args...>) {
-                return std::get<I>(functors)(std::forward<Args>(args)...);
-            } else {
-                return try_dispatch<I + 1>(std::forward<Args>(args)...);
-            }
-        } else {
-            return std::nullopt;
-        }
-    }
-    
-public:
-    constexpr explicit MultiDispatcher(Functors... fs) : functors(std::move(fs)...) {}
-    
-    template<typename... Args>
-    constexpr auto operator()(Args&&... args) const -> std::optional<int> {
-        return try_dispatch<0>(std::forward<Args>(args)...);
-    }
-};
-
-template<typename... Functors>
-MultiDispatcher(Functors...) -> MultiDispatcher<Functors...>;
 
 struct A { 
     int value; 
@@ -188,6 +70,17 @@ TEST_F(MultiDispatchTest, SingleVariantDispatch) {
     }, v1);
     
     EXPECT_EQ(result, 84);
+}
+
+TEST_F(MultiDispatchTest, ConstVariantDispatch) {
+    using V = std::variant<int, char>;
+    const V v = 'A';
+
+    auto result = multi_visit([](const auto& val) {
+        return static_cast<int>(val);
+    }, v);
+
+    EXPECT_EQ(result, 65);
 }
 
 TEST_F(MultiDispatchTest, TwoVariantsDispatch) {
@@ -447,7 +340,7 @@ TEST_F(MultiDispatchTest, ExceptionSafety) {
     
     using V = std::variant<int, ThrowingType>;
     V v1 = 42;
-    V v2 = ThrowingType{};
+    V v2(std::in_place_type<ThrowingType>);
     
     EXPECT_NO_THROW({
         multi_visit([](auto&&, auto&&) {}, v1, v2);
@@ -525,9 +418,4 @@ TEST_F(MultiDispatchTest, VariadicTemplateExpansion) {
     
     auto result = multi_visit_tuple(test_expansion, tuple);
     EXPECT_DOUBLE_EQ(result, 6.0);
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
